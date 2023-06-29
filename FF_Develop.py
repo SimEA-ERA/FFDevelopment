@@ -378,7 +378,10 @@ def numba_find_bezier_taus(xvals,r,M):
     tguess=0.5
     for i in prange(xvals.size):
         xv = xvals[i]
-        taus[i] = numba_find_bezier_t__newton(xv,r,M,tguess)
+        if xv==0:
+            taus[i] = 0.0
+        else:
+            taus[i] = numba_find_bezier_t__newton(xv,r,M,tguess)
         #taus[i] = numba_find_bezier_t__bisect(xv,r,M)
     return taus
 
@@ -450,7 +453,7 @@ def u_bezier(rhos,y):
     rho_max = rhos.max()
     
     ny = y.shape[0] 
-    dx = rho_max/float(ny-2)
+    dx = rho_max/float(ny-1)
     x = np.empty_like(y)
     
     M = numba_bezier_matrix(ny)
@@ -698,9 +701,9 @@ class Setup_Interfacial_Optimization():
         'nLD':0,
         'nPW':1,
         'LD_model':'polynomial',
-        'LD_types' : [''],
+        'LD_central_types' : [''],
         'rho_r0' : [1.1],
-        'rho_rc': [5.1],
+        'rho_rc': [6.0],
         }
     
     def __init__(self,fname):
@@ -793,7 +796,7 @@ class Setup_Interfacial_Optimization():
             n = getattr(self,'n'+prefix)
             for i in range (n):
                 key = '{:s}{:d}'.format(prefix,i)
-                params = self.get_params(lines[section_lines[key]:])
+                params = self.get_params(lines[section_lines[key]:],prefix)
                 attrname = 'init' +key
                 setattr(self,attrname,params)
                 self.initExceptions(model,params)
@@ -821,14 +824,18 @@ class Setup_Interfacial_Optimization():
                         raise ValueError('Initialization Error/non TYPE:  {}  lower bound {} must be greater than {}'.format(j,bn,bo))
         return
     
-    def get_params(self,lines):
+    def get_params(self,lines,prefix):
         
         types = []
         params = dict()
         for j,line in enumerate(lines):
             
             if 'TYPE' in line:
-                inter = self.sort_type(line.split('TYPE')[1].split())
+                inter = line.split('TYPE')[1].split()
+                if prefix not in ['LD',]:
+                    inter = self.sort_type(inter)
+                else:
+                    inter = tuple(inter)
                 types.append(inter)
             if ':' in line:
                 li = line.split(':')
@@ -1331,9 +1338,9 @@ class Interactions():
                 if ty == tyvdw[0]:
                     ltpa = tuple([ arr[arr[:,1]==i] for i in np.unique(arr[:,1]) ])
                     rhos[tyvdw] = ltpa
-                elif ty == tyvdw[1]:
+                if ty == tyvdw[1]:
                     ltpa = tuple([ arr[arr[:,0]==i] for i in np.unique(arr[:,0]) ])
-                    rhos[tyvdw] = ltpa
+                    rhos[(tyvdw[1],tyvdw[0])] = ltpa
         return rhos
     
     def find_configuration_inters(self,Bonds,atom_types):
@@ -2091,9 +2098,9 @@ class Data_Manager():
         data = self.data
         #data = self.get_systems_data(self.data,sys_name)
         pair_dists = []
-        key = tuple(np.sort([t for t in ty]))
+        #key = tuple(np.sort([t for t in ty]))
         for j,d in data.iterrows():
-            pair_dists.extend(d['values'][inter_type][key])
+            pair_dists.extend(d['values'][inter_type][ty])
         return np.array(pair_dists)
     
 
@@ -2121,6 +2128,7 @@ class Optimizer():
             logger.error(s)
             raise Exception(s)
         return
+    
     @property
     def data_train(self):
         return self.data.loc[self.train_indexes]
@@ -2187,7 +2195,7 @@ class Interfacial_FF_Optimizer(Optimizer):
         return Uclass
 
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True,parallel=True)
     def Upair(Uclass,npars_pertype,Np,u_model,dists,dl,du,model_pars):
         #compute upair
         dix = 0
@@ -2386,7 +2394,7 @@ class Interfacial_FF_Optimizer(Optimizer):
     def find_regularization_args(model,isnot_fixed):
         if 'Morse' in model:
             fu = lambda j : (j+2)%3==0
-        elif 'double_exp' ==model:
+        elif 'double_exp' == model:
             fu = lambda j : j%3 == 0
         else:
             fu = lambda j : True
@@ -2603,7 +2611,7 @@ class Interfacial_FF_Optimizer(Optimizer):
             ni = int(k[2:])
             pars = self.setup.model_parameters(self.setup.LD_model,params.columns)
             fmodel = globals()['u_'+self.setup.LD_model] 
-            
+            num_pars = len(pars)
             for ty,pot in params.iterrows():
                 N_LD+=1
                 r0 = self.setup.rho_r0[ni]
@@ -2614,7 +2622,7 @@ class Interfacial_FF_Optimizer(Optimizer):
                 tynei = typemap[ty[0]]
                 lines.append('{:d}  {:s}\n'.format(tyc,lc2))
                 lines.append('{:d}  {:s}\n'.format(tynei,lc3))
-                
+                print('saving LD type {} on the same file'.format(ty))
                 rho_distribution = Data_Manager(data,self.setup).get_distribution(ty,'rhos{:d}'.format(ni))
                 rho_min = rho_distribution.min()
                 rho_max = rho_distribution.max()
@@ -2974,19 +2982,19 @@ class Interfacial_Evaluator(Evaluator):
         plt.show()
         return 
     
-    def plot_potential(self,params,model,size=3.3,fname=None,
+    def plot_potential(self,params,model,size=3.5,fname=None,
                        dpi=300,rmin= 1,rmax=5,umax=None,xlabel=None):
         
         pars = self.setup.model_parameters(model,params.columns)
         f = globals()['u_'+model]        
-        
+        colors = ['#d7191c','#fdae61','#abd9e9','#2c7bb6']
         figsize = (size,size) 
         fig = plt.figure(figsize=figsize,dpi=dpi)
         plt.minorticks_on()
         plt.tick_params(direction='in', which='minor',length=5)
         plt.tick_params(direction='in', which='major',length=10)
 
-        for j, pot in params.iterrows():
+        for i,(j, pot) in enumerate(params.iterrows()):
             try:
                 rmx = rmax[j]
             except TypeError:
@@ -2999,8 +3007,8 @@ class Interfacial_Evaluator(Evaluator):
                 filt = u<=umax
                 u = u[filt]
                 r = r[filt]
-            plt.plot(r,u,label='{}'.format(j))
-        plt.legend()
+            plt.plot(r,u,label='{}'.format(j),color=colors[i])
+        plt.legend(frameon=False,fontsize=2.3*size)
         if xlabel is None:
             plt.xlabel(r'r / $\AA$')
         else:
@@ -3008,6 +3016,7 @@ class Interfacial_Evaluator(Evaluator):
         if fname is not None:
             plt.savefig(fname,bbox_inches='tight')
         plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol')
+        
         plt.show()
         return 
     
