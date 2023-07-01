@@ -701,7 +701,7 @@ class Setup_Interfacial_Optimization():
         'nLD':0,
         'nPW':1,
         'LD_model':'polynomial',
-        'LD_central_types' : [''],
+        'LD_types' : [''],
         'rho_r0' : [1.1],
         'rho_rc': [6.0],
         }
@@ -2613,6 +2613,9 @@ class Interfacial_FF_Optimizer(Optimizer):
             fmodel = globals()['u_'+self.setup.LD_model] 
             num_pars = len(pars)
             for ty,pot in params.iterrows():
+                x = np.array([pot[p] for p in pars])
+                if (x == 0.0).all():
+                    continue
                 N_LD+=1
                 r0 = self.setup.rho_r0[ni]
                 rc = self.setup.rho_rc[ni]
@@ -2630,7 +2633,7 @@ class Interfacial_FF_Optimizer(Optimizer):
                 lines.append('{:.8e} {:.8e} {:.8e} {:s}\n'.format(rho_min,rho_max+diff,diff,lc4))
                 
                 rhov = np.arange(rho_min,rho_max+diff,diff)
-                x = np.array([pot[p] for p in pars])
+                
                 Frho = fmodel(rhov,x)
                 for fr in Frho:
                     lines.append('{:.8e}\n'.format(fr))
@@ -2671,21 +2674,23 @@ class measures:
         u = (u1-u2)**4
         return np.sum(u)/u1.shape[0]
     @staticmethod
-    def relmaxMAE(u1,u2):
+    def relMAE(u1,u2):
         s = np.abs(u1).max()
-        d = np.abs(u1-u2)/s
-        err = np.sum(d)/u1.shape[0]
-        return err
+        mae = measures.MAE(u1,u2)
+        err = mae/s
+        return 100*err
+    @staticmethod
+    def percE(u1,u2):
+        s = np.abs(u1).max()
+        mae = measures.MAE(u1,u2)
+        mse = measures.MSE(u1,u2)
+        return 0.5*(mae/s+mse/s**2)
     @staticmethod
     def elasticnet(u1,u2):
         return 0.5*(measures.MAE(u1,u2)+measures.MSE(u1,u2))
     @staticmethod
     def MAEmMSE(u1,u2):
         return np.sqrt(measures.MAE(u1,u2)*measures.MSE(u1,u2))
-    @staticmethod
-    def relMAE(u1,u2):
-        u = u1 -u2
-        return np.abs((u1-u2)/u1).sum()/u1.shape[0]
     @staticmethod
     def MAE(u1,u2):
         return np.abs(u1-u2).sum()/u1.shape[0]
@@ -2699,17 +2704,15 @@ class measures:
         return r.std()
     @staticmethod
     def relMSE(u1,u2):
-        u = (u2 -u1)/u1
-        return np.dot(u,u)/u1.shape[0]
+        mse = measures.MSE(u1,u2)
+        s = np.abs(u1).max()
+        
+        e = 100*(mse**0.5)/s
+        return e
     @staticmethod
     def MSE(u1,u2):
         u = u2 -u1
         return np.sum(u*u)/u1.shape[0]
-    @staticmethod
-    def relmaxMSE(u1,u2):
-        u = (u2 -u1)
-        m = np.abs(u).max()
-        return np.sum(u*u/m)/u1.shape[0]
     @staticmethod
     def L1(u1,u2):
         a = np.abs(u1)
@@ -3013,9 +3016,12 @@ class Interfacial_Evaluator(Evaluator):
             plt.xlabel(r'r / $\AA$')
         else:
             plt.xlabel(xlabel)
+            
+        plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol')
+        
         if fname is not None:
             plt.savefig(fname,bbox_inches='tight')
-        plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol')
+        
         
         plt.show()
         return 
@@ -3023,9 +3029,9 @@ class Interfacial_Evaluator(Evaluator):
     
     def plot_scan_paths(self,size=3.5,dpi=300,
                    xlabel=r'scanning distance ($\AA$)', ylabel=r'$E_{dft}$ ($kcal/mol$)',
-                   title=None,
+                   title=None,show_fit=True,
                    length_minor=1.4, length_major=2.8,
-                   path=None, fname=None,
+                   path=None, fname=None,markersize=0.7,
                    selector=dict(),x_col=None,subsample=None,scan_paths=(0,1e15)):
         #make_dir(path)
         
@@ -3070,8 +3076,9 @@ class Interfacial_Evaluator(Evaluator):
             e_data = dp['Energy'].to_numpy()[xi]
             u_data = dp['Uclass'].to_numpy()[xi]
             plt.plot(x_data, e_data, ls='none', marker='o',color=c,
-                fillstyle='none',markersize=0.7*size)
-            plt.plot(x_data, u_data, lw=0.2*size,color=c)
+                fillstyle='none',markersize=markersize*size)
+            if show_fit:
+                plt.plot(x_data, u_data, lw=0.2*size,color=c)
         
         plt.xlabel(xlabel,fontsize = 2.5*size)
         plt.ylabel(ylabel,fontsize = 2.5*size)
