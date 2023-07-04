@@ -474,6 +474,9 @@ def u_bspline(rhos,x):
     fu = BSpline(t,x,k)
     return fu(rhos)
 
+
+
+
 @jit(nopython=True,fastmath=True)
 def u_LJnm(r,x):
     r0 = x[0]
@@ -503,12 +506,17 @@ def u_compass(r,r0,epsilon,c):
 
 
 @jit(nopython=True,fastmath=True)
-def u_LJq(r,sigma,epsilon,q):
-    ulj = 4.0*epsilon*( (sigma/r)**12 - (sigma/r)**6 )+q/r
+def u_LJq(r,x):
+    sigma = x[0]
+    epsilon = x[1]
+    qeff = x[2]
+    ulj = 4.0*epsilon*( (sigma/r)**12 - (sigma/r)**6 )-qeff*627.503/r
     return ulj 
 
 @jit(nopython=True,fastmath=True)
-def u_LJ(r,sigma,epsilon):
+def u_LJ(r,x):
+    sigma = x[0]
+    epsilon = x[1]
     ulj = 4.0*epsilon*( (sigma/r)**12 - (sigma/r)**6 )
     return ulj 
 
@@ -864,6 +872,8 @@ class Setup_Interfacial_Optimization():
             return ['A','B','C']
         elif model =='LJ':
             return ['sigma','epsilon']
+        elif model =='LJq':
+            return ['sigma','epsilon','qeff']
         elif model =='LJnm':
             return ['r0','e0','n','m']
         elif model=='LJnmq':
@@ -1006,6 +1016,7 @@ class Interactions():
             find_bonds=False, find_vdw_connected=False,find_densities_with=None,
             find_dihedrals=False,find_angles=False,
             excludedBondtypes=[],**kwargs):
+        
         self.data = data
         self.atom_model = atom_model
         self.vdw_bond_dist = vdw_bond_dist
@@ -1138,12 +1149,25 @@ class Interactions():
         value: set of neihbours
         '''
         neibs = dict()
-        for k in connectivity.keys(): 
-            neibs[k[0]] = set() # initializing set of neibs
-            neibs[k[1]] = set()
-        for j in connectivity.keys():
-            neibs[j[0]].add(j[1])
-            neibs[j[1]].add(j[0])
+        if type(connectivity) is dict:
+            for k in connectivity.keys(): 
+                neibs[k[0]] = set() # initializing set of neibs
+                neibs[k[1]] = set()
+            for j in connectivity.keys():
+                neibs[j[0]].add(j[1])
+                neibs[j[1]].add(j[0])
+        else:
+            for i in range(connectivity.shape[0]):
+                k1 =connectivity[i,0]
+                k2 = connectivity[i,1]
+                neibs[k1] = set()
+                neibs[k2] = set()
+            for i in range(connectivity.shape[0]):
+                k1 =connectivity[i,0]
+                k2 = connectivity[i,1]
+                neibs[k1].add(k2)
+                neibs[k2].add(k1)
+            
         return neibs
     
     @staticmethod
@@ -1206,7 +1230,7 @@ class Interactions():
     def get_united_types(at_types,neibs):
         united_types = np.empty(len(at_types),dtype=object)
         for i,t in enumerate(at_types):
-            
+            print(i,t)
             nh=0
             if i in neibs:
                 for neib in neibs[i]:
@@ -1346,15 +1370,15 @@ class Interactions():
     def find_configuration_inters(self,Bonds,atom_types):
         
         Bonds = Interactions.bonds_to_python(Bonds)
-        
-        at_types = Interactions.get_at_types(atom_types.copy(),Bonds)
-        
+        neibs = Interactions.get_neibs(Bonds)
+        #at_types = Interactions.get_at_types(atom_types.copy(),Bonds)
+        at_types=atom_types
         connectivity = Interactions.get_connectivity(Bonds,at_types,self.excludedBondtypes)
         
         neibs = Interactions.get_neibs(connectivity)
         types = Interactions.get_itypes(self.atom_model,at_types,Bonds,neibs)
-        
-        
+        types = Interactions.get_at_types(types.copy(),Bonds)
+        print(types)
         #1.) Find 2 pair-non bonded interactions
         vdw = Interactions.get_vdw(types,neibs,self.find_vdw_connected,
                       self.find_vdw_unconnected,
@@ -1611,22 +1635,25 @@ class Data_Manager():
             
         return 
     
-    def read_frames(self,filename,connectivity_file):
+    @staticmethod
+    def read_frames(filename):
         with open(filename,'r') as f:
             lines = f.readlines()
             f.closed
-        
+     
         line_confs =[]
         natoms = []
         comments = []
         for i,line in enumerate(lines):
-            if 'data_point' in line:
+            if 'iteration' in line:
                 line_confs.append(i-1)
                 comments.append(line.split('\n')[0])
                 natoms.append(int(lines[i-1].split('\n')[0]))
+        
         confs_at = []
         confs_coords = []
         for j,n in zip(line_confs,natoms):
+           
             atoms_type = []
             coords = []
             for i in range(j+2,j+n+2):         
@@ -1659,15 +1686,12 @@ class Data_Manager():
                  'atoms_type':confs_at,'atomic_configuration':confs_coords,'comment':comments}
         dataframe =pd.DataFrame(data)
         #bonds
-        bonds = self.read_mol2(connectivity_file)['Bonds'][0] #this function returns a dictionary
-        dataframe['Bonds'] = [bonds]*len(dataframe)
         
-        self.make_labels(dataframe)
-        
-        self.data = dataframe
-        return 
+
+        return dataframe 
     
-    def make_labels(self,dataframe):
+    @staticmethod
+    def make_labels(dataframe):
         n = len(dataframe)
         attr_rep = np.empty(n,dtype=object)
         i=0
@@ -2531,7 +2555,7 @@ class Interfacial_FF_Optimizer(Optimizer):
             logger.info('Total optimization time = {:.3e} sec'.format(self.opt_time))
             #Get the new params and give to vdw_dataframe
             self.results = res
-            
+             
         else:
             # Filling with dump values to avoid coding errors
             dump_value = 123321
@@ -2541,17 +2565,25 @@ class Interfacial_FF_Optimizer(Optimizer):
         for prefix in ['PW','LD']:
             n = getattr(self.setup,'n'+prefix)
             for i in range(n):
-                ni = np.sum(npars[:jiter])
-                ni1 = np.sum(npars[:jiter+1])
-                opt_X = res.x[ni : ni1]
                 init_dfX = getattr(self.setup,'init{:s}{:d}'.format(prefix,i))
-                optPars = self.save_params_todf( opt_X,init_dfX)
                 attrname= 'opt{:s}{:d}'.format(prefix,i)
                 dicname = attrname[3:]
-                setattr(self,attrname,optPars)
-                setattr(self.setup,attrname,optPars)
-                self.optParams[dicname] = optPars
-                jiter+=1
+                if optimization_performed:
+                    ni = np.sum(npars[:jiter])
+                    ni1 = np.sum(npars[:jiter+1])
+                    opt_X = res.x[ni : ni1]
+                    optPars = self.save_params_todf( opt_X,init_dfX)
+                    
+                    
+                    setattr(self,attrname,optPars)
+                    setattr(self.setup,attrname,optPars)
+                    self.optParams[dicname] = optPars
+                    jiter+=1
+                else:
+                    setattr(self,attrname,init_dfX)
+                    setattr(self.setup,attrname,init_dfX)
+                    self.optParams[dicname] = init_dfX
+                    
             
         return 
     
