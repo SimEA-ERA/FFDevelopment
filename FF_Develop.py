@@ -373,15 +373,17 @@ def numba_find_bezier_t__newton(xval,r,M,tguess):
     return tnew
 
 @jit(nopython=True,fastmath=True,parallel=True)
-def numba_find_bezier_taus(xvals,r,M):
+def numba_find_bezier_taus(xvals,rho_max,r,M):
     taus = np.empty_like(xvals)
     tguess=0.5
     for i in prange(xvals.size):
         xv = xvals[i]
         if xv==0:
             taus[i] = 0.0
-        else:
+        elif xv<rho_max:
             taus[i] = numba_find_bezier_t__newton(xv,r,M,tguess)
+        else:
+            taus[i] = 1.0
         #taus[i] = numba_find_bezier_t__bisect(xv,r,M)
     return taus
 
@@ -441,16 +443,17 @@ def u_bezierXY(rhos,bxy):
     
     M = numba_bezier_matrix(nbs)
 
-    taus = numba_find_bezier_taus(rhos,bx,M)
+    taus = numba_find_bezier_taus(rhos,rho_max,bx,M)
 
     u = numba_bezier_rtaus(taus,by,M)
     
     return u
 
 @jit(nopython=True,fastmath=True)
-def u_bezier(rhos,y):
+def u_bezier(rhos,yp):
     
-    rho_max = rhos.max()
+    rho_max = yp[0]
+    y = yp[1:]
     
     ny = y.shape[0] 
     dx = rho_max/float(ny-1)
@@ -461,7 +464,7 @@ def u_bezier(rhos,y):
     for i in range(ny):
         x[i] = float(i)*dx
 
-    taus = numba_find_bezier_taus(rhos,x,M)
+    taus = numba_find_bezier_taus(rhos,rho_max,x,M)
 
     u = numba_bezier_rtaus(taus,y,M)
     
@@ -504,6 +507,11 @@ def u_compass(r,r0,epsilon,c):
     ulj = epsilon*( 2*(r0/r)**9 - 3*(r0/r)**6 ) - c/r
     return ulj 
 
+@jit(nopython=True,fastmath=True)
+def u_qeff(r,x):
+    qeff = x[0]*627.503
+    u = -qeff/r
+    return 
 
 @jit(nopython=True,fastmath=True)
 def u_LJq(r,x):
@@ -1013,8 +1021,8 @@ class Interactions():
     
     def __init__(self,data,atom_model = 'AA',
             vdw_bond_dist=4, find_vdw_unconnected = False,
-            find_bonds=False, find_vdw_connected=False,find_densities_with=None,
-            find_dihedrals=False,find_angles=False,
+            find_bonds=False, find_vdw_connected=False,
+            find_dihedrals=False,find_angles=False,find_densities=False,
             excludedBondtypes=[],**kwargs):
         
         self.data = data
@@ -1025,8 +1033,8 @@ class Interactions():
         self.find_vdw_connected = find_vdw_connected
         self.find_angles = find_angles
         self.find_dihedrals = find_dihedrals
-        self.find_densities_with = find_densities_with
-        if self.find_densities_with is not None:
+        self.find_densities = find_densities
+        if find_densities:
             for rh in ['rho_r0','rho_rc']:
                 if rh  not in kwargs:
                     raise Exception('{:s} is not given'.format(rho_r0))
@@ -1352,19 +1360,19 @@ class Interactions():
         
         return inters
     
-    def get_rhos(find_densities_with,vdw):
-        if not iterable(find_densities_with):
-            find_densities_with = [find_densities_with]
+    def get_rhos(vdw):
+        find_densities_with = np.unique([list(ty) for ty in vdw])
         rhos = dict()
         
         for ty in find_densities_with:
             for tyvdw,arr in vdw.items():
                 if ty == tyvdw[0]:
                     ltpa = tuple([ arr[arr[:,1]==i] for i in np.unique(arr[:,1]) ])
-                    rhos[tyvdw] = ltpa
+                    rhos[(tyvdw[1],tyvdw[0])] = ltpa # central atom first
                 if ty == tyvdw[1]:
                     ltpa = tuple([ arr[arr[:,0]==i] for i in np.unique(arr[:,0]) ])
-                    rhos[(tyvdw[1],tyvdw[0])] = ltpa
+                    rhos[tyvdw] = ltpa # central atom first
+                    
         return rhos
     
     def find_configuration_inters(self,Bonds,atom_types):
@@ -1378,7 +1386,7 @@ class Interactions():
         neibs = Interactions.get_neibs(connectivity)
         types = Interactions.get_itypes(self.atom_model,at_types,Bonds,neibs)
         types = Interactions.get_at_types(types.copy(),Bonds)
-        print(types)
+        
         #1.) Find 2 pair-non bonded interactions
         vdw = Interactions.get_vdw(types,neibs,self.find_vdw_connected,
                       self.find_vdw_unconnected,
@@ -1404,8 +1412,8 @@ class Interactions():
                               [connectivity, angles, dihedrals, vdw])
                  }
                                                    
-        if self.find_densities_with is not None:
-            rhos = Interactions.get_rhos(self.find_densities_with,inters['vdw'])
+        if self.find_densities:
+            rhos = Interactions.get_rhos(inters['vdw'])
         else:
             rhos = dict()
         inters['rhos'] = rhos
@@ -1443,25 +1451,30 @@ class Interactions():
     def plot_phi_rho(r0,rc):
         def get_rphi(r0,rc):
             c = Interactions.compute_coeff(r0, rc)
-            r = np.arange(0,rc,0.001)
+            r = np.arange(0,rc*1.04,0.001)
             phi = np.array([Interactions.phi_rho(x,c,r0,rc) for x in r])
             return r,phi
-        
-        fig = plt.figure(figsize=(3.5,3.5),dpi=300)
+        size = 3.2
+        fig = plt.figure(figsize=(size,size),dpi=300)
         plt.minorticks_on()
         plt.tick_params(direction='in', which='minor',length=3)
         plt.tick_params(direction='in', which='major',length=5)
-        plt.ylabel(r'$\phi_{ij}(r)$')
+        plt.ylabel(r'$\phi(r)$')
         plt.xlabel(r'$r$ $(\AA)$')
+        plt.xticks([i for i in range(int(max(rc))+1)])
+        colors = ['#e41a1c','#377eb8','#4daf4a']
+        plt.title('Illustration of the activation function',fontsize=3.4*size)
+        styles =['-','-.','--']
         if iterable(r0):
-            for rf0,rfc in zip(r0,rc):
+            for i,(rf0,rfc) in enumerate(zip(r0,rc)):
                 r,phi = get_rphi(rf0,rfc)
-                label = '({:2.1f},{:2.1f})'.format(rf0,rfc)
-                plt.plot(r,phi,label=label)
-            plt.legend(frameon=False)
+                label = r'$r_c$={:1.1f} $\AA$'.format(rfc)
+                plt.plot(r,phi,label=label,color=colors[i%3],lw=size/2.0,ls=styles[i%3])
+            plt.legend(frameon=False,fontsize=2.5*size)
         else:
             r,phi = get_rphi(r0,rc)
             plt.plot(r,phi)
+        plt.savefig('activation.eps',format='eps',bbox_inches='tight')
         plt.show()
     @staticmethod
     def compute_coeff(r0,rc):
@@ -2231,8 +2244,9 @@ class Interfacial_FF_Optimizer(Optimizer):
             #print(m.shape)
             U = u_model(d,m)
             dix+=n
-            dlt = dl[t]
-            dut = du[t]
+            dlt = dl[t]  # shape numper of data
+            dut = du[t]  # shape number of data
+            
             for i in prange(Uclass.size):
                 Uclass[i] += U[dlt[i] : dut[i]].sum()
         
@@ -2326,7 +2340,7 @@ class Interfacial_FF_Optimizer(Optimizer):
                 
         dists = np.array(dists)
         if np.sum(Np) != dists.shape[0]:
-            s = 'Something is wrong with the serialization {:3d} != {:3d}'.format(np.sum(Np),dists.shape[0])
+            s = 'Something is wrong with the serialization sum Np {:3d} != dists.shape[0] {:3d}'.format(np.sum(Np),dists.shape[0])
             logger.error(s)
             raise Exception(s)
         
@@ -2485,7 +2499,7 @@ class Interfacial_FF_Optimizer(Optimizer):
         
         LossFunc = self.LossFunction
         
-        regf = getattr(regulizators(),self.setup.regularization_method)
+        regf = getattr(regularizators(),self.setup.regularization_method)
         args = (costf,E,weights,infoObjects, self.setup.reg_par,regArgs,regf)
        
         self.infoObjects = infoObjects
@@ -2679,7 +2693,7 @@ class Interfacial_FF_Optimizer(Optimizer):
             
                 
                 
-class regulizators:
+class regularizators:
     @staticmethod
     def ridge(x):
         return np.sum(x*x)
@@ -2688,7 +2702,7 @@ class regulizators:
         return np.sum(abs(x))
     @staticmethod
     def elasticnet(x):
-        return 0.5*(regulizators.ridge(x)+regulizators.lasso(x))
+        return 0.5*(regularizators.ridge(x)+regularizators.lasso(x))
     @staticmethod
     def smoothness(x):
         n2 = int(x.size/2)
@@ -2699,6 +2713,7 @@ class regulizators:
     @staticmethod
     def none(x):
         return 0.0
+    
 class measures:
     
     @staticmethod
@@ -2911,7 +2926,7 @@ class Interfacial_Evaluator(Evaluator):
                                xlabel=r'$E_{dft}$', ylabel=r'$U_{class}$',
                                col1='Energy', col2='Uclass',title=None,
                                length_minor=5, length_major=10,units =r'$kcal/mol$',
-                               path=None, fname='pred_vs_target.png',
+                               path=None, fname='pred_vs_target.png',attrs=None,
                                save_fig=True,compare=None,diff=False,scale=1.05):
         make_dir(path)
         x_data = self.data[col1].to_numpy()
@@ -2922,6 +2937,8 @@ class Interfacial_Evaluator(Evaluator):
             path = self.setup.runpath
         col = self.data[compare]
         uncol = np.unique(col)
+        if attrs is not None:
+            uncol = np.array(attrs)
         colors = get_colorbrewer_colors(len(uncol))
         if not diff:
             fig = plt.figure(figsize=figsize,dpi=dpi)
@@ -2937,6 +2954,7 @@ class Interfacial_Evaluator(Evaluator):
             else:
                 for i,c in enumerate(uncol):
                     f = col == c
+                    print(f.any(),c)
                     plt.plot(x_data[f], y_data[f],label=c,ls='None',color=colors[i],
                              marker='o',markersize=5,fillstyle='none')
             plt.plot(perf_line,perf_line, ls='--', color='k',lw=0.9)
@@ -3018,7 +3036,9 @@ class Interfacial_Evaluator(Evaluator):
         return 
     
     def plot_potential(self,params,model,size=3.5,fname=None,
-                       dpi=300,rmin= 1,rmax=5,umax=None,xlabel=None):
+                       dpi=300,rmin= 1,rmax=5,
+                       umax=None,xlabel=None,ylabel=None,
+                       title=None):
         
         pars = self.setup.model_parameters(model,params.columns)
         f = globals()['u_'+model]        
@@ -3026,9 +3046,13 @@ class Interfacial_Evaluator(Evaluator):
         figsize = (size,size) 
         fig = plt.figure(figsize=figsize,dpi=dpi)
         plt.minorticks_on()
-        plt.tick_params(direction='in', which='minor',length=5)
-        plt.tick_params(direction='in', which='major',length=10)
-
+        plt.tick_params(direction='in', which='minor',length=size)
+        plt.tick_params(direction='in', which='major',length=2*size)
+        lst = ['-','--','-.',(0,(1,1))]
+        plt.xticks(fontsize=3.0*size)
+        plt.yticks(fontsize=3.0*size)
+        if title is not None:
+            plt.title(title,fontsize=size*4.0)
         for i,(j, pot) in enumerate(params.iterrows()):
             try:
                 rmx = rmax[j]
@@ -3042,14 +3066,17 @@ class Interfacial_Evaluator(Evaluator):
                 filt = u<=umax
                 u = u[filt]
                 r = r[filt]
-            plt.plot(r,u,label='{}'.format(j),color=colors[i])
+            label = r'$\alpha\beta={:s}$ ${:s}$'.format(j[0],j[1])
+            plt.plot(r,u,label=label,lw=size/2.0,color=colors[i],ls=lst[i])
         plt.legend(frameon=False,fontsize=2.3*size)
         if xlabel is None:
-            plt.xlabel(r'r / $\AA$')
+            plt.xlabel(r'r / $\AA$',fontsize=3.5*size)
         else:
-            plt.xlabel(xlabel)
-            
-        plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol')
+            plt.xlabel(xlabel,fontsize=3.5*size)
+        if ylabel is not None:
+            plt.ylabel(ylabel,fontsize=3.5*size)
+        else:    
+            plt.ylabel(r'$U_{'+'{:s}'.format(model)+'}$ / kcal/mol',fontsize=3.5*size)
         
         if fname is not None:
             plt.savefig(fname,bbox_inches='tight')
@@ -3067,8 +3094,8 @@ class Interfacial_Evaluator(Evaluator):
                    selector=dict(),x_col=None,subsample=None,scan_paths=(0,1e15)):
         #make_dir(path)
         
-        self.data.loc[:,'filepath'] = ['/'.join(x.split('/')[:-2]) for x in self.data['filename']]
-        data = self.data[['filepath','filename','Energy','scan_val','Uclass']]
+        self.data.loc[:,'scanpath'] = ['/'.join(x.split('/')[:-2]) for x in self.data['filename']]
+        data = self.data[['scanpath','filename','Energy','scan_val','Uclass']]
         filt = Data_Manager.data_filter(data,selector)
         
         figsize=(size,size)
@@ -3082,7 +3109,7 @@ class Interfacial_Evaluator(Evaluator):
         plt.tick_params(direction='in', which='major',length=size*length_major)
         
 
-        unq = np.unique(data['filepath'])
+        unq = np.unique(data['scanpath'])
         nu = len(unq)
         chosen = np.arange(0,nu,dtype='i')
         if subsample is not None:
@@ -3100,7 +3127,7 @@ class Interfacial_Evaluator(Evaluator):
         nch = len(iss)
         for j,ip in enumerate(iss):
             fp = unq[ip]
-            dp = data[ data['filepath'] == fp ]
+            dp = data[ data['scanpath'] == fp ]
             x_data = dp['scan_val'].to_numpy()
             xi = x_data.argsort()   
             x_data = x_data[xi]
@@ -3213,3 +3240,47 @@ class mappers():
     @property
     def atomic_num(self):
         return {'{:d}'.format(int(i+1)):elem for i,elem in enumerate(self.elements_mass.keys())}
+    
+    
+def demonstrate_bezier(by=None,dpi=300,size=3.2,fname=None,format='eps',
+                      rhomax=10.0,show_points=True,seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+    if by is None:
+        y = np.array([0,0,5.0,-12.0,-18.0,23,0,0])
+        y1 = y.copy()
+        y1[2:-2] += np.random.normal(0,5.0,4)
+        y2 = y.copy() +np.random.normal(0,5.9,8)
+        by = [y,y1,y2]
+    else:
+        if type(by) is not list:
+            by = [by,]
+    n = by[0].shape[0]
+    dx = rhomax/(n-1)
+    bx = np.array([i*dx for i in range(n)])
+    curve = globals()['u_bezier']
+    drho=0.01
+    rh = np.arange(drho,rhomax+drho,drho)
+    colors = ['#d7191c','#fdae61','#abd9e9','#2c7bb6']
+    figsize = (size,size) 
+    fig = plt.figure(figsize=figsize,dpi=dpi)
+    plt.minorticks_on()
+    plt.tick_params(direction='in', which='minor',length=5)
+    plt.tick_params(direction='in', which='major',length=10)
+    markers =['o','s','x','v']
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.title('Illustration of the Bezier curves',fontsize=3.4*size)
+    for j in range(len(by)):
+        y= by[j]
+        u = curve(rh,y)
+        plt.plot(rh,u,color=colors[j],lw=0.6*size,label='curve {:d}'.format(j+1))
+        if show_points:
+            plt.plot(bx,y,ls='none',marker=markers[j],markeredgewidth=0.5*size,
+                     markersize=2.0*size,fillstyle='none',color=colors[j])
+    plt.legend(frameon=False,fontsize=2.5*size)
+    if fname is not None:
+         plt.savefig(fname,bbox_inches='tight',format=format)
+    plt.show()
+    
+    return
