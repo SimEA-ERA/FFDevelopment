@@ -2488,7 +2488,7 @@ class Interfacial_FF_Optimizer(Optimizer):
         self.weights = weights
         
         params,bounds,regArgs,infoObjects,npars = self.get_nessesary_info( 'init','train')
-            
+        
         self.regArgs = regArgs
 
         opt_method = self.setup.optimization_method
@@ -2774,8 +2774,13 @@ class measures:
         return np.sum(u)/u1.shape[0]
     @staticmethod
     def BIAS(u1,u2):
-        u = u1-u2
+        u = u2-u1
         return u.mean()
+    @staticmethod
+    def relBIAS(u1,u2):
+        s = np.abs(u1.min())
+        u= u2-u1
+        return 100*u.mean()/s
     @staticmethod
     def blockMAE(u1,u2):
         nblocks=10
@@ -2870,10 +2875,13 @@ class Interfacial_Evaluator(Evaluator):
         f = np.ones(len(self.data),dtype=bool)
         for col,val in colval.items():
             f = np.logical_and(f,self.data[col]==val)
-        
+           
         u1 = self.Energy[f]
         u2 = self.Uclass[f]
-        return fun(u1,u2)
+        try:
+            return fun(u1,u2)#
+        except:
+            return None
     
     def make_evaluation_table(self,funs,cols,add_tot=True,save_csv=None):
 
@@ -2894,6 +2902,7 @@ class Interfacial_Evaluator(Evaluator):
                 for i,col in enumerate(cols):    
                     ev.loc[ind_iter,col] = index[i]
                     colval[col] = index[i]
+                    
                 ev.loc[ind_iter,fn] = self.get_error(fun,colval)
         if add_tot:
             for fn in funs:
@@ -2922,10 +2931,11 @@ class Interfacial_Evaluator(Evaluator):
         return
 
     
-    def plot_predict_vs_target(self,figsize=(3.3,3.3),dpi=300,
-                               xlabel=r'$E_{dft}$', ylabel=r'$U_{class}$',
+    def plot_predict_vs_target(self,size=2.35,dpi=500,
+                               xlabel=r'$E_{int}$', ylabel=r'$U$',
                                col1='Energy', col2='Uclass',title=None,
-                               length_minor=5, length_major=10,units =r'$kcal/mol$',
+                               units =r'$kcal/mol$',
+                               label_map=None,
                                path=None, fname='pred_vs_target.png',attrs=None,
                                save_fig=True,compare=None,diff=False,scale=1.05):
         make_dir(path)
@@ -2940,27 +2950,32 @@ class Interfacial_Evaluator(Evaluator):
         if attrs is not None:
             uncol = np.array(attrs)
         colors = get_colorbrewer_colors(len(uncol))
+        
         if not diff:
-            fig = plt.figure(figsize=figsize,dpi=dpi)
+            fig = plt.figure(figsize=(size,size),dpi=dpi)
             plt.minorticks_on()
-            plt.tick_params(direction='in', which='minor',length=length_minor)
-            plt.tick_params(direction='in', which='major',length=length_major)
+            plt.tick_params(direction='in', which='minor',length=size)
+            plt.tick_params(direction='in', which='major',length=2*size)
             perf_line = [x_data.min()*scale,x_data.max()*scale]
-            
+            plt.xticks(fontsize=3.0*size)
+            plt.yticks(fontsize=3.0*size)
             if title is not None:
-                plt.title(title)
+                plt.title(title,fontsize=4.0*size)
             if compare is None:
                 plt.plot(x_data, y_data,ls='None',color='purple',marker='o',markersize=5,fillstyle='none')
             else:
                 for i,c in enumerate(uncol):
                     f = col == c
-                    print(f.any(),c)
-                    plt.plot(x_data[f], y_data[f],label=c,ls='None',color=colors[i],
-                             marker='o',markersize=5,fillstyle='none')
-            plt.plot(perf_line,perf_line, ls='--', color='k',lw=0.9)
-            plt.xlabel(xlabel)
-            plt.ylabel(ylabel)
-            plt.legend(frameon=False)
+                    if label_map is not None:
+                        lbl = label_map[c]
+                    else:
+                        lbl = c
+                    plt.plot(x_data[f], y_data[f],label=lbl,ls='None',color=colors[i],
+                             marker='o',markersize=5/3.5*size,fillstyle='none')
+            plt.plot(perf_line,perf_line, ls='--', color='k',lw=size/2)
+            plt.xlabel(xlabel,fontsize=3.5*size)
+            plt.ylabel(ylabel,fontsize=3.5*size)
+            plt.legend(frameon=False,fontsize=3.0*size)
             if fname is not None:
                 plt.savefig(path +'\\'+fname,bbox_inches='tight')
             plt.show()
@@ -2971,10 +2986,10 @@ class Interfacial_Evaluator(Evaluator):
                 plt.tick_params(direction='in', which='minor',length=length_minor)
                 plt.tick_params(direction='in', which='major',length=length_major)
                 perf_line = [x_data.min()*1.05,x_data.max()*1.05]
-                plt.plot(perf_line,perf_line, ls='--', color='k',lw=0.9)
+                plt.plot(perf_line,perf_line, ls='--', color='k',lw=size/2)
                 f = col == c
                 plt.plot(x_data[f], y_data[f],label=c,ls='None',color=colors[i],
-                             marker='o',markersize=5,fillstyle='none')
+                             marker='o',markersize=5/3.5*sizew,fillstyle='none')
                 plt.xlabel(xlabel)
                 plt.ylabel(ylabel)
                 plt.legend(frameon=False)
@@ -3036,7 +3051,7 @@ class Interfacial_Evaluator(Evaluator):
         return 
     
     def plot_potential(self,params,model,size=3.5,fname=None,
-                       dpi=300,rmin= 1,rmax=5,
+                       dpi=500,rmin= 1,rmax=5,
                        umax=None,xlabel=None,ylabel=None,
                        title=None):
         
@@ -3068,7 +3083,7 @@ class Interfacial_Evaluator(Evaluator):
                 r = r[filt]
             label = r'$\alpha\beta={:s}$ ${:s}$'.format(j[0],j[1])
             plt.plot(r,u,label=label,lw=size/2.0,color=colors[i],ls=lst[i])
-        plt.legend(frameon=False,fontsize=2.3*size)
+        plt.legend(frameon=False,fontsize=2.5*size)
         if xlabel is None:
             plt.xlabel(r'r / $\AA$',fontsize=3.5*size)
         else:
@@ -3086,67 +3101,74 @@ class Interfacial_Evaluator(Evaluator):
         return 
     
     
-    def plot_scan_paths(self,size=3.5,dpi=300,
-                   xlabel=r'scanning distance ($\AA$)', ylabel=r'$E_{dft}$ ($kcal/mol$)',
+    def plot_scan_paths(self,size=2.65,dpi=300,
+                   xlabel=r'scanning distance / $\AA$', ylabel=r'$E_{int}$ / $kcal/mol$',
                    title=None,show_fit=True,
-                   length_minor=1.4, length_major=2.8,
                    path=None, fname=None,markersize=0.7,
+                   n1=3,n2=2,maxplots=None,
                    selector=dict(),x_col=None,subsample=None,scan_paths=(0,1e15)):
         #make_dir(path)
-        
         self.data.loc[:,'scanpath'] = ['/'.join(x.split('/')[:-2]) for x in self.data['filename']]
-        data = self.data[['scanpath','filename','Energy','scan_val','Uclass']]
-        filt = Data_Manager.data_filter(data,selector)
         
+        filt = Data_Manager.data_filter(self.data,selector)
+        data = self.data[filt]
+        data = data[['scanpath','filename','Energy','scan_val','Uclass']]
+        
+        
+        unq = np.unique(data['scanpath'])
+        nsubs=n1*n2
+        if maxplots is None:
+            nu = len(unq)
+        else:
+            nu = min(int(len(unq)/nsubs)+1,maxplots)*nsubs
         figsize=(size,size)
         cmap = matplotlib.cm.get_cmap('tab20')
         
-        fig = plt.figure(figsize=figsize,dpi=dpi)
-        if title is not None:
-            plt.title(title)
-        plt.minorticks_on()
-        plt.tick_params(direction='in', which='minor',length=size*length_minor)
-        plt.tick_params(direction='in', which='major',length=size*length_major)
-        
+        if abs(n1-n2)!=1:
+            raise Exception('|n1-n2| should equal one')
+        for jp in range(0,nu,nsubs):
+            fig = plt.figure(figsize=figsize,dpi=dpi)
+            plt.xlabel(xlabel, fontsize=2.5*size,labelpad=4*size)
+            plt.ylabel(ylabel, fontsize=2.5*size,labelpad=4*size)
+            plt.xticks([])
+            plt.yticks([])
+            nfig = int(jp/nsubs)
+            if title is None:
+                fig.suptitle('set of paths {}'.format(nfig),fontsize=3*size)
+            else:
+                fig.suptitle(title,fontsize=3*size)
+            gs = fig.add_gridspec(n1, n2, hspace=0, wspace=0)
+            ax = gs.subplots(sharex='col', sharey='row')
 
-        unq = np.unique(data['scanpath'])
-        nu = len(unq)
-        chosen = np.arange(0,nu,dtype='i')
-        if subsample is not None:
-            nch = subsample
-            chosen = np.random.choice(chosen,nch,replace=False)
-        else:
-            nch = nu
-        
-        iss = []
-        for i,fp in enumerate(unq):
-            if i not in chosen or  i <scan_paths[0] or i>scan_paths[1]:
-                continue
-        
-            iss.append(i)
-        nch = len(iss)
-        for j,ip in enumerate(iss):
-            fp = unq[ip]
-            dp = data[ data['scanpath'] == fp ]
-            x_data = dp['scan_val'].to_numpy()
-            xi = x_data.argsort()   
-            x_data = x_data[xi]
-            c = cmap(j%nch/nch)
-            e_data = dp['Energy'].to_numpy()[xi]
-            u_data = dp['Uclass'].to_numpy()[xi]
-            plt.plot(x_data, e_data, ls='none', marker='o',color=c,
-                fillstyle='none',markersize=markersize*size)
-            if show_fit:
-                plt.plot(x_data, u_data, lw=0.2*size,color=c)
-        
-        plt.xlabel(xlabel,fontsize = 2.5*size)
-        plt.ylabel(ylabel,fontsize = 2.5*size)
+            for j,fp in enumerate(unq[jp:jp+nsubs]):
+                
+                dp = data[ data['scanpath'] == fp ]
+                x_data = dp['scan_val'].to_numpy()
+                xi = x_data.argsort()   
+                x_data = x_data[xi]
+                c = cmap(j%nsubs/nsubs)
+                e_data = dp['Energy'].to_numpy()[xi]
+                u_data = dp['Uclass'].to_numpy()[xi]
+                j1 = j%n1
+                j2 = j%n2
+                ax[j1][j2].plot(x_data, e_data, ls='none', marker='o',color=c,
+                    fillstyle='none',markersize=markersize*size,label=r'$E_{int}$')
+                if show_fit:
+                    ax[j1][j2].plot(x_data, u_data, lw=0.3*size,color='k',label=r'fit')
+                #ax[j1][j2].legend(frameon=False,fontsize=2.0*size)
+                ax[j1][j2].minorticks_on()
+                ax[j1][j2].tick_params(direction='in', which='minor',length=size*0.8,labelsize=size*2)
+                ax[j1][j2].tick_params(direction='in', which='major',length=size*1.4,labelsize=size*2)
+            
         #plt.legend(frameon=False)
-        if fname is not None:
             if path is None:
                 path= self.setup.runpath
-            plt.savefig('{}/{}'.format(path,fname),bbox_inches='tight')
-        plt.show()
+                
+            if fname is None:
+                plt.savefig('{}/spths{}.png'.format(path,nfig),bbox_inches='tight')
+            else:
+                plt.savefig('{:s}/{:s}'.format(path,fname))
+            plt.show()
     
     def plot_eners(self,figsize=(3.3,3.3),dpi=300,
                    xlabel=r'$\AA$', ylabel=r'$kcal/mol$',

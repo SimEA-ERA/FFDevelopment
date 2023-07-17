@@ -2,3 +2,5 @@
 __pycashe__
 *.log
 *.pyc
+*.eps
+*.png
