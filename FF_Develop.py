@@ -22,6 +22,7 @@ from scipy.interpolate import BSpline
 import collections
 import six
 
+
 class logs():
     '''
     A class for modifying the loggers
@@ -131,7 +132,10 @@ def weighting(E,weighting_method,T=1,w=1):
         weights = np.ones(len(E))*w
     elif weighting_method == 'Boltzman':
         weights = w*np.exp(-E/T)/np.sum(np.exp(-E/T))
-        weights /=weights.mean() 
+        weights /=weights.mean()
+        a = E.argsort()
+        #plt.plot(weights[a],E[a])
+        #plt.show()
     elif weighting_method == 'linear':
         weights = w*(E.max()-E+1.0)/(E.max()-E.min()+1.0)
     elif weighting_method =='divbyEsquare':
@@ -546,7 +550,7 @@ def u_double_exp(r,x):
     C = x[3]
     D = x[4]
     rl = x[5]
-    u = A*np.exp(-B*(r-re)) - C*np.exp(-D*(r-rl))
+    u = np.exp(-B*(r-re)+A) - np.exp(-D*(r-rl)+C)
     return u
 
 def du_double_exp(r,A,B,re,C,D,rl):
@@ -687,6 +691,7 @@ class Setup_Interfacial_Optimization():
         'uncertainty_method':'no',
         'max_ener':1.0,
         'max_force':0.003,
+        'central_LD_atoms': ['',],
         'split_method':'random',
         'colsplit':'label',
         'train_colvars': ['',],
@@ -803,8 +808,8 @@ class Setup_Interfacial_Optimization():
             my_setattr(self,var,value,defaults)
             
         for atname,de in defaults.items():
-                if not hasattr(self,atname):
-                    setattr(self,atname,de)
+            if not hasattr(self,atname):
+                setattr(self,atname,de)
         #Get initial conditions
         
         for prefix in ['PW','LD']:
@@ -820,8 +825,6 @@ class Setup_Interfacial_Optimization():
         return 
     
 
-
-        return
     def initExceptions(self,model,params):
         if model =='bezierXY':
             modelpars = self.model_parameters(model, params.columns)
@@ -832,11 +835,11 @@ class Setup_Interfacial_Optimization():
                 for j,pars in params.iterrows():
                     if pars[bn]<pars[bo]:
                         raise ValueError('Initialization Error/non TYPE: {} {} must be greater than {}'.format(j,bn,bo))
-                    if pars[bn+'_b'][0]<pars[bo+'_b'][1]:
+                    if pars[bn+'_bl']<pars[bo+'_bu']:
                         raise ValueError('Initialization Error/non TYPE:  {}  lower bound {} must be greater than the upper bound {}'.format(j,bn,bo))
-                    if pars[bn]<pars[bo+'_b'][1]:
+                    if pars[bn]<pars[bo+'_bu']:
                         raise ValueError('Initialization Error/non TYPE:  {} {} must be greater than the upper bound {}'.format(j,bn,bo))
-                    if pars[bn+'_b'][0]<pars[bo]:
+                    if pars[bn+'_bl']<pars[bo]:
                         raise ValueError('Initialization Error/non TYPE:  {}  lower bound {} must be greater than {}'.format(j,bn,bo))
         return
     
@@ -858,11 +861,14 @@ class Setup_Interfacial_Optimization():
                 var = li[0].strip() ; value = [float(x) for x in li[1].split()]
                 if len(value) != 4:
                     raise Exception('In line "{:s}..." Cannot determine parameters. Expected 4 values {:1d} were given " \n Give "value optimize_or_not low_bound upper_bound'.format(line[0:30],len(value)))
+                
                 if var not in params.keys():
-                    params[var] = []; params[var+'_opt'] = [] ; params[var+'_b'] = [] 
+                    params[var] = []; params[var+'_opt'] = [] ;
+                    params[var+'_bl'] = [] ; params[var+'_bu'] =[]
                 params[var].append(value[0])
                 params[var+'_opt'].append(bool(value[1]))
-                params[var+'_b'].append((value[2],value[3]))
+                params[var+'_bl'].append(value[2])
+                params[var+'_bu'].append(value[3])
             if '/' in line:
                 break
             
@@ -951,7 +957,7 @@ class Setup_Interfacial_Optimization():
     def runpath(self):
         r = self.storing_path
         for a in self.runpath_attributes:
-            r = os.path.join(r,str(getattr(self,a)))
+            r += '/{:s}'.format(str(getattr(self,a)))
         return r
     
 
@@ -1001,7 +1007,7 @@ class Setup_Interfacial_Optimization():
                     file.write('TYPE '+' '.join(j) +'\n')
                     for p in parnames:
                         file.write('{:10s} : {:8.6f}  {:d}  {:8.6f}  {:8.6f}  \n'.format(
-                                    p, d[p], int(d[p+'_opt']), d[p+'_b'][0], d[p+'_b'][1]))
+                                    p, d[p], int(d[p+'_opt']), d[p+'_bl'], d[p+'_bu']))
                 
                 file.write('/\n\n')
                 
@@ -1019,12 +1025,12 @@ class Setup_Interfacial_Optimization():
 
 class Interactions():
     
-    def __init__(self,data,atom_model = 'AA',
+    def __init__(self,data,setup,atom_model = 'AA',
             vdw_bond_dist=4, find_vdw_unconnected = False,
             find_bonds=False, find_vdw_connected=False,
             find_dihedrals=False,find_angles=False,find_densities=False,
             excludedBondtypes=[],**kwargs):
-        
+        self.setup = setup
         self.data = data
         self.atom_model = atom_model
         self.vdw_bond_dist = vdw_bond_dist
@@ -1052,7 +1058,7 @@ class Interactions():
     @staticmethod
     def bonds_to_python(Bonds):
         if len(Bonds) == 0:
-            return Bonds
+            return np.array(Bonds)
         bonds = np.array(Bonds,dtype=int)
         min_id = bonds[:,0:2].min()
         logger.debug('min_id = {:d}'.format(min_id))
@@ -1360,19 +1366,21 @@ class Interactions():
         
         return inters
     
-    def get_rhos(vdw):
-        find_densities_with = np.unique([list(ty) for ty in vdw])
-        rhos = dict()
+    def get_rhos(vdw,central_atoms):
         
-        for ty in find_densities_with:
+        
+        rhos = dict()
+        types = np.unique([x for x in vdw.keys()])
+        for ty in types:
             for tyvdw,arr in vdw.items():
-                if ty == tyvdw[0]:
+                
+                if ty == tyvdw[0] and tyvdw[1] in central_atoms  :
                     ltpa = tuple([ arr[arr[:,1]==i] for i in np.unique(arr[:,1]) ])
                     rhos[(tyvdw[1],tyvdw[0])] = ltpa # central atom first
-                if ty == tyvdw[1]:
+                if ty == tyvdw[1] and tyvdw[0] in central_atoms:
                     ltpa = tuple([ arr[arr[:,0]==i] for i in np.unique(arr[:,0]) ])
                     rhos[tyvdw] = ltpa # central atom first
-                    
+                        
         return rhos
     
     def find_configuration_inters(self,Bonds,atom_types):
@@ -1413,7 +1421,8 @@ class Interactions():
                  }
                                                    
         if self.find_densities:
-            rhos = Interactions.get_rhos(inters['vdw'])
+            
+            rhos = Interactions.get_rhos(inters['vdw'],self.setup.central_LD_atoms)
         else:
             rhos = dict()
         inters['rhos'] = rhos
@@ -1448,23 +1457,24 @@ class Interactions():
         return
     
     @staticmethod
-    def plot_phi_rho(r0,rc):
+    def activation_function_illustration(r0,rc):
         def get_rphi(r0,rc):
             c = Interactions.compute_coeff(r0, rc)
             r = np.arange(0,rc*1.04,0.001)
             phi = np.array([Interactions.phi_rho(x,c,r0,rc) for x in r])
             return r,phi
-        size = 3.2
+        
+        size = 3.0
         fig = plt.figure(figsize=(size,size),dpi=300)
         plt.minorticks_on()
-        plt.tick_params(direction='in', which='minor',length=3)
-        plt.tick_params(direction='in', which='major',length=5)
+        plt.tick_params(direction='in', which='minor',length=size)
+        plt.tick_params(direction='in', which='major',length=size*2)
         plt.ylabel(r'$\phi(r)$')
         plt.xlabel(r'$r$ $(\AA)$')
         plt.xticks([i for i in range(int(max(rc))+1)])
-        colors = ['#e41a1c','#377eb8','#4daf4a']
-        plt.title('Illustration of the activation function',fontsize=3.4*size)
-        styles =['-','-.','--']
+        colors = ['#1b9e77','#d95f02','#7570b3']
+        plt.title('Illustration of the activation function',fontsize=3.0*size)
+        styles =['-','-','-']
         if iterable(r0):
             for i,(rf0,rfc) in enumerate(zip(r0,rc)):
                 r,phi = get_rphi(rf0,rfc)
@@ -1474,7 +1484,7 @@ class Interactions():
         else:
             r,phi = get_rphi(r0,rc)
             plt.plot(r,phi)
-        plt.savefig('activation.eps',format='eps',bbox_inches='tight')
+        plt.savefig('activation.png',bbox_inches='tight')
         plt.show()
     @staticmethod
     def compute_coeff(r0,rc):
@@ -1629,8 +1639,11 @@ class Data_Manager():
         return    
     
     @staticmethod
-    def save_selected_data(fname,data,selector=dict()):
-        
+    def save_selected_data(fname,data,selector=dict(),labels=None):
+        if labels is not  None:
+            for j,pars in data.iterrows():
+                comment = ' , '.join(['{:s}  = {:}'.format(lab, pars[lab]) for lab in labels])
+                data.loc[j,'comment'] = 'index = {} , '.format(j) + comment
         dataT = data[Data_Manager.data_filter(data,selector)]
         with open(fname,'w') as f:
             for j,data in dataT.iterrows():
@@ -1977,6 +1990,24 @@ class Data_Manager():
         seed = self.setup.seed
         sampling_method = self.setup.sampling_method
         
+        def get_valid():
+            vinfo = self.setup.validation_set
+            
+            ndata = len(data)
+            f = np.ones(ndata,dtype=bool)
+            
+            for colval in vinfo.split('&'):
+                temp =  colval.split(':')
+                col = temp[0]
+                vals = temp[1]
+                
+                fv = np.zeros(ndata,dtype=bool)
+                for v in vals.split(','):
+                    
+                    fv = np.logical_or(fv,data[col]==v.strip())
+                f = np.logical_and(fv,f)
+            return f
+        
         if sampling_method=='random':
             train_data = self.sample_randomly(train_perc, data, seed)
             train_indexes = train_data.index
@@ -1991,26 +2022,19 @@ class Data_Manager():
         
         elif sampling_method=='column':
             
-            vinfo = self.setup.validation_set
-            
-            ndata = len(data)
-            f = np.ones(ndata,dtype=bool)
-            
-            for colval in vinfo.split('&'):
-                temp =  colval.split(':')
-                col = temp[0]
-                vals = temp[1]
-                fv = np.zeros(ndata,dtype=bool)
-                for v in vals.split(','):
-                    fv = np.logical_or(fv,data[col]==v.strip())
-                f = np.logical_and(fv,f)
+            f = get_valid()
             
             valid_data = data[f]
             train_test_data = data[np.logical_not(f)]
             train_data = self.sample_randomly(train_perc, train_test_data, seed)
             train_indexes = train_data.index
             test_data = train_test_data.loc[ train_test_data.index.difference(train_indexes) ]
-            
+        elif sampling_method =='valid':
+            f = get_valid()
+            valid_data = data[f]
+            train_data = self.sample_randomly(train_perc, data, seed)
+            train_indexes = train_data.index
+            test_data = data.loc[ data.index.difference(train_indexes) ]
         else:
             raise Exception(NotImplementedError('"{}" is not a choice'.format(sampling_method) ))
         test_indexes = test_data.index
@@ -2416,7 +2440,7 @@ class Interfacial_FF_Optimizer(Optimizer):
                 isnot_fixed.append(par[mn+'_opt']) # its a question variable
                 if par[mn+'_opt']:
                     params.append(par[mn])
-                    bounds.append(tuple(par[mn+'_b']))
+                    bounds.append( (par[mn+'_bl'],par[mn+'_bu']) )
                     #print('TYPE = {} , par = {} , value = {:4.5f}'.format(k,mn,par[mn]))
                 else: 
                     fixed_params.append(par[mn])
@@ -2431,7 +2455,7 @@ class Interfacial_FF_Optimizer(Optimizer):
     @staticmethod
     def find_regularization_args(model,isnot_fixed):
         if 'Morse' in model:
-            fu = lambda j : (j+2)%3==0
+            fu = lambda j : False #(j+2)%3==0
         elif 'double_exp' == model:
             fu = lambda j : j%3 == 0
         else:
@@ -2485,6 +2509,8 @@ class Interfacial_FF_Optimizer(Optimizer):
         
         E = self.get_Energy('train')
         weights = weighting(E,self.setup.weighting_method,self.setup.bT,self.setup.w)
+        #argsopt= np.where (self.data_train['label']=='optimal')[0]
+        #weights[argsopt]*=5.0
         self.weights = weights
         
         params,bounds,regArgs,infoObjects,npars = self.get_nessesary_info( 'init','train')
@@ -2504,6 +2530,7 @@ class Interfacial_FF_Optimizer(Optimizer):
        
         self.infoObjects = infoObjects
         
+    
         if params.shape[0] >0:
             t1 = perf_counter()
             
@@ -2560,6 +2587,7 @@ class Interfacial_FF_Optimizer(Optimizer):
             optimization_performed = False
         
         if optimization_performed:
+            print('OPTIMIZATION TIME = {:.4e} sec'.format(self.opt_time))
             self.regLoss = self.setup.reg_par*regf(res.x[regArgs])
             self.unregLoss = res.fun - self.regLoss  
             
@@ -2824,10 +2852,7 @@ class measures:
             return (u1-u2).mean()
         return ut/fblocks
 
-    @staticmethod
-    def relBIAS(u1,u2):
-        s = np.abs(u1).max()
-        return (u1-u2).mean()/s
+
     
     @staticmethod
     def MAX(u1,u2):
@@ -2956,11 +2981,12 @@ class Interfacial_Evaluator(Evaluator):
             plt.minorticks_on()
             plt.tick_params(direction='in', which='minor',length=size)
             plt.tick_params(direction='in', which='major',length=2*size)
-            perf_line = [x_data.min()*scale,x_data.max()*scale]
+            xmax = x_data.max()*scale if x_data.max()>0 else x_data.max()/scale
+            perf_line = [x_data.min()*scale,xmax]
             plt.xticks(fontsize=3.0*size)
             plt.yticks(fontsize=3.0*size)
             if title is not None:
-                plt.title(title,fontsize=4.0*size)
+                plt.title(title,fontsize=3.5*size)
             if compare is None:
                 plt.plot(x_data, y_data,ls='None',color='purple',marker='o',markersize=5,fillstyle='none')
             else:
@@ -3101,18 +3127,21 @@ class Interfacial_Evaluator(Evaluator):
         return 
     
     
-    def plot_scan_paths(self,size=2.65,dpi=300,
-                   xlabel=r'scanning distance / $\AA$', ylabel=r'$E_{int}$ / $kcal/mol$',
+    def plot_scan_paths(self,size=2.65,dpi=450,
+                   xlabel=r'scanning distance / $\AA$', ylabel=r'$Energy$ / $kcal/mol$',
                    title=None,show_fit=True,
                    path=None, fname=None,markersize=0.7,
-                   n1=3,n2=2,maxplots=None,
+                   n1=3,n2=2,maxplots=None, add_u = None,
                    selector=dict(),x_col=None,subsample=None,scan_paths=(0,1e15)):
         #make_dir(path)
         self.data.loc[:,'scanpath'] = ['/'.join(x.split('/')[:-2]) for x in self.data['filename']]
         
         filt = Data_Manager.data_filter(self.data,selector)
         data = self.data[filt]
-        data = data[['scanpath','filename','Energy','scan_val','Uclass']]
+        cols = ['scanpath','filename','Energy','scan_val','Uclass'] 
+        if type(add_u) is dict:
+            cols += list(add_u.keys())
+        #data = data[cols]
         
         
         unq = np.unique(data['scanpath'])
@@ -3129,7 +3158,7 @@ class Interfacial_Evaluator(Evaluator):
         for jp in range(0,nu,nsubs):
             fig = plt.figure(figsize=figsize,dpi=dpi)
             plt.xlabel(xlabel, fontsize=2.5*size,labelpad=4*size)
-            plt.ylabel(ylabel, fontsize=2.5*size,labelpad=4*size)
+            plt.ylabel(ylabel, fontsize=2.5*size,labelpad=6*size)
             plt.xticks([])
             plt.yticks([])
             nfig = int(jp/nsubs)
@@ -3139,10 +3168,13 @@ class Interfacial_Evaluator(Evaluator):
                 fig.suptitle(title,fontsize=3*size)
             gs = fig.add_gridspec(n1, n2, hspace=0, wspace=0)
             ax = gs.subplots(sharex='col', sharey='row')
-
+            lsts = ['-','--','-','--']
+            
+            colors=  ['#ca0020','#f4a582','#92c5de','#0571b0']
             for j,fp in enumerate(unq[jp:jp+nsubs]):
                 
                 dp = data[ data['scanpath'] == fp ]
+                
                 x_data = dp['scan_val'].to_numpy()
                 xi = x_data.argsort()   
                 x_data = x_data[xi]
@@ -3151,15 +3183,26 @@ class Interfacial_Evaluator(Evaluator):
                 u_data = dp['Uclass'].to_numpy()[xi]
                 j1 = j%n1
                 j2 = j%n2
-                ax[j1][j2].plot(x_data, e_data, ls='none', marker='o',color=c,
+                print(j1,j2,fp)
+                ax[j1][j2].plot(x_data, e_data, ls='none', marker='o',color='gray',
                     fillstyle='none',markersize=markersize*size,label=r'$E_{int}$')
                 if show_fit:
-                    ax[j1][j2].plot(x_data, u_data, lw=0.3*size,color='k',label=r'fit')
+                    if type(add_u) is not dict:
+                        ax[j1][j2].plot(x_data, u_data, lw=0.27*size,color='k',label=r'fit')
+                    else:
+                        for jmi, (k,v) in enumerate(add_u.items()):
+                            u_data= dp[k].to_numpy()[xi]
+                            ax[j1,j2].plot(x_data,u_data ,
+                                           lw=0.27*size, color=colors[jmi],label=v,
+                                           ls=lsts[jmi])
                 #ax[j1][j2].legend(frameon=False,fontsize=2.0*size)
                 ax[j1][j2].minorticks_on()
-                ax[j1][j2].tick_params(direction='in', which='minor',length=size*0.8,labelsize=size*2)
-                ax[j1][j2].tick_params(direction='in', which='major',length=size*1.4,labelsize=size*2)
-            
+                ax[j1][j2].tick_params(direction='in', which='minor',length=size*0.6,labelsize=size*1.5)
+                ax[j1][j2].tick_params(direction='in', which='major',length=size*1.2,labelsize=size*1.5)
+            lines_labels = [ax.get_legend_handles_labels() for i,ax in enumerate(fig.axes) if i<2]
+            lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+
+            fig.legend(lines, labels, loc='upper center',bbox_to_anchor=(0.5,0.03), ncol=5,frameon=False,fontsize=2.0*size)
         #plt.legend(frameon=False)
             if path is None:
                 path= self.setup.runpath
@@ -3167,7 +3210,7 @@ class Interfacial_Evaluator(Evaluator):
             if fname is None:
                 plt.savefig('{}/spths{}.png'.format(path,nfig),bbox_inches='tight')
             else:
-                plt.savefig('{:s}/{:s}'.format(path,fname))
+                plt.savefig('{:s}/{:s}'.format(path,fname),bbox_inches='tight')
             plt.show()
     
     def plot_eners(self,figsize=(3.3,3.3),dpi=300,
@@ -3264,45 +3307,60 @@ class mappers():
         return {'{:d}'.format(int(i+1)):elem for i,elem in enumerate(self.elements_mass.keys())}
     
     
-def demonstrate_bezier(by=None,dpi=300,size=3.2,fname=None,format='eps',
-                      rhomax=10.0,show_points=True,seed=None):
+
+def demonstrate_bezier(dpi=300,size=3.4,fname=None,
+                      rhomax=10.0,show_points=True,seed=None,illustration='y'):
     if seed is not None:
         np.random.seed(seed)
-    if by is None:
-        y = np.array([0,0,5.0,-12.0,-18.0,23,0,0])
-        y1 = y.copy()
-        y1[2:-2] += np.random.normal(0,5.0,4)
-        y2 = y.copy() +np.random.normal(0,5.9,8)
-        by = [y,y1,y2]
-    else:
-        if type(by) is not list:
-            by = [by,]
-    n = by[0].shape[0]
-    dx = rhomax/(n-1)
-    bx = np.array([i*dx for i in range(n)])
+    
+    y = np.array([10.0,0,0,5.0,-12.0,-13.0,-23,0,0])
+    y1 = y.copy()
+        
+    y1[3:-2] += np.random.normal(0,6.0,4)
+    y2 = y.copy() 
+    y2[0] = 13.0
+    y3 = y.copy()
+    y3[0] = 7.0
+    data = {0:[y,y1],1:[y,y2,y3]}
+
     curve = globals()['u_bezier']
     drho=0.01
-    rh = np.arange(drho,rhomax+drho,drho)
-    colors = ['#d7191c','#fdae61','#abd9e9','#2c7bb6']
+    
+    colors = ['#1b9e77','#d95f02','#7570b3']
     figsize = (size,size) 
     fig = plt.figure(figsize=figsize,dpi=dpi)
     plt.minorticks_on()
-    plt.tick_params(direction='in', which='minor',length=5)
-    plt.tick_params(direction='in', which='major',length=10)
-    markers =['o','s','x','v']
-    plt.xlabel('x')
-    plt.ylabel('y')
-    plt.title('Illustration of the Bezier curves',fontsize=3.4*size)
-    for j in range(len(by)):
-        y= by[j]
-        u = curve(rh,y)
-        plt.plot(rh,u,color=colors[j],lw=0.6*size,label='curve {:d}'.format(j+1))
-        if show_points:
-            plt.plot(bx,y,ls='none',marker=markers[j],markeredgewidth=0.5*size,
-                     markersize=2.0*size,fillstyle='none',color=colors[j])
-    plt.legend(frameon=False,fontsize=2.5*size)
+    markers =['*','s','x','v']
+    plt.ylabel(r'$f(\rho)$', fontsize=2.5*size,labelpad=8*size)
+    plt.xlabel(r'$\rho$', fontsize=2.5*size,labelpad=4*size)
+    plt.xticks([])
+    plt.yticks([])
+    gs = fig.add_gridspec(1, 2, hspace=0, wspace=0)
+    ax = gs.subplots(sharex='col', sharey='row')
+    fig.suptitle(r'Illustration of the Bezier curve construction ',fontsize=2.7*size)
+    #ax[1].set_title(r'Varying the  positions of the Bezier CPs ',fontsize=2.5*size)
+    
+    for i,(k,d) in enumerate(data.items()):
+        
+        
+        for j,yb in enumerate(d):
+            print(drho,yb)
+            rh = np.arange(drho,yb[0]+drho,drho)
+            u = curve(rh,yb)
+            label=None
+            ax[i].plot(rh,u,color=colors[j],lw=0.6*size,label=label)
+            if show_points:
+                bx = np.arange(0,yb[0]+0.01,yb[0]/(yb.shape[0]-2))
+                ax[i].plot(bx,yb[1:],ls='none',marker=markers[j],markeredgewidth=0.5*size,
+                    markersize=2.0*size,fillstyle='none',color=colors[j])
+        ax[i].minorticks_on()
+        ax[i].tick_params(direction='in', which='minor',length=size*0.6,labelsize=size*1.5)
+        ax[i].tick_params(direction='in', which='major',length=size*1.2,labelsize=size*1.5)
+        ax[i].tick_params(axis='both', labelsize=size*2.5)
+        ax[i].set_xticks([x for x in range(2,int(y[0]+2),2)])
+        ax[i].legend(frameon=False,fontsize=2.5*size)
     if fname is not None:
-         plt.savefig(fname,bbox_inches='tight',format=format)
+         plt.savefig(fname,bbox_inches='tight')
     plt.show()
     
     return
